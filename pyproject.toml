@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sara-powerbi"
+version = "0.1.0"
+description = "MCP Server for Power BI Agentic workflows"
+authors = [
+    {name = "Mateus Brito", email = "mateuscdebrito@gmail.com"}
+]
+dependencies = [
+    "mcp[cli]",
+    "pythonnet",
+    "psutil",
+    "pandas",
+    "matplotlib",
+    "seaborn"
+]
+requires-python = ">=3.10"
+
+[project.scripts]
+sara-powerbi = "sara_powerbi.server:main"

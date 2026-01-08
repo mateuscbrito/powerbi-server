@@ -1,0 +1,6 @@
+mcp
+pythonnet
+psutil
+pandas
+matplotlib
+seaborn
