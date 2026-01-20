@@ -1,11 +1,16 @@
 {
     "mcpServers": {
         "sara-powerbi": {
-            "command": "python",
+            "command": "C:\\FULL\\PATH\\TO\\FOLDER\\venv\\Scripts\\python.exe",
             "args": [
                 "-u",
-                "C:\\path\\to\\your\\cloned\\repo\\src\\sara_powerbi\\server.py"
+                "-m",
+                "sara_powerbi.server"
             ],
+            "env": {
+                "PYTHONPATH": "C:\\FULL\\PATH\\TO\\FOLDER\\src",
+                "PYTHONUTF8": "1"
+            },
             "disabledTools": [
                 "visualize_python"
             ]
