@@ -2,12 +2,38 @@ import json
 from ..connection import get_server, get_adomd_connection, GLOBAL_CONTEXT
 import psutil
 
-def manage_model_connection(operation: str = "get_current") -> str:
-    """Manage connection (list/select/get_current)."""
+def manage_model_connection(operation: str = "get_current", connection_string: str = None) -> str:
+    """Manage connection (list/select/get_current/connect)."""
     try:
         if operation == "get_current":
+            cs = GLOBAL_CONTEXT.get("connection_string")
+            if cs: return json.dumps({"connected": True, "type": "xmla", "connection_string": cs}, indent=2)
+            
             s = get_server()
-            return json.dumps({"connected": True, "port": GLOBAL_CONTEXT["port"], "db": s.Databases[0].Name}, indent=2)
+            return json.dumps({"connected": True, "type": "local", "port": GLOBAL_CONTEXT["port"], "db": s.Databases[0].Name}, indent=2)
+        
+        elif operation == "connect":
+            if not connection_string: return "Error: connection_string is required for 'connect' operation."
+            
+            # Reset previous context
+            GLOBAL_CONTEXT["connection_string"] = connection_string
+            GLOBAL_CONTEXT["port"] = None # Invalidate local port priority
+            
+            try:
+                s = get_server()
+                if s.Databases.Count > 0:
+                    db_name = s.Databases[0].Name
+                    # Update connection string with Catalog for ADOMD
+                    if "Initial Catalog" not in GLOBAL_CONTEXT["connection_string"]:
+                         GLOBAL_CONTEXT["connection_string"] += f";Initial Catalog={db_name}"
+                    
+                    return f"Successfully connected to: {db_name} (Compatibility: {s.Databases[0].CompatibilityLevel})"
+                else:
+                    return "Connected to Workspace, but no datasets found."
+            except Exception as e:
+                GLOBAL_CONTEXT["connection_string"] = None
+                return f"Connection Failed: {e}"
+
         elif operation == "list":
             return json.dumps([{"pid": p.info['pid'], "name": p.info['name']} for p in psutil.process_iter(['pid','name']) if 'msmdsrv' in (p.info['name'] or '').lower()], indent=2)
         return "Unknown op"
@@ -146,42 +172,49 @@ def manage_table(operation: str, table_name: str, type: str = "Global", source_e
     """Create/Delete Tables. Types: 'Global' (M), 'Calculated' (DAX)."""
     try:
         m = get_server().Databases[0].Model
-        if operation == "create":
-             if any(t.Name == table_name for t in m.Tables): return "Table exists."
-             
+        
+        if operation == "create" or operation == "update":
              import clr
-             try: from Microsoft.AnalysisServices.Tabular import Table, Partition, PartitionSourceType, ModeType
-             except: from Microsoft.PowerBI.Tabular import Table, Partition, PartitionSourceType, ModeType
+             try: from Microsoft.AnalysisServices.Tabular import Table, Partition, PartitionSourceType, ModeType, MPartitionSource, CalculatedPartitionSource
+             except: from Microsoft.PowerBI.Tabular import Table, Partition, PartitionSourceType, ModeType, MPartitionSource, CalculatedPartitionSource
              
-             new_t = Table()
-             new_t.Name = table_name
+             # Check if table exists
+             t = next((t for t in m.Tables if t.Name == table_name), None)
              
-             part = Partition()
-             part.Name = table_name
+             if operation == "create":
+                 if t: return "Table exists."
+                 t = Table()
+                 t.Name = table_name
+                 m.Tables.Add(t)
              
-             if type == "Calculated":
-                 # DAX Table
-                 part.SourceType = PartitionSourceType.Calculated
-                 part.Source =  source_expression # Source for Calc is just the string expression? No, it's a CalculatedPartitionSource
-                 # Handling Calc tables in TOM is tricky, usually requires setting valid properties.
-                 # Simplified for M partition (Global) often easier
-                 pass 
-             else:
-                 # M Partition
+             # If Updating/Creating M Partition
+             if type == "Global" or type == "M":
+                 # Find or Create Partition
+                 part = next((p for p in t.Partitions), None)
+                 if not part:
+                     part = Partition()
+                     part.Name = table_name
+                     t.Partitions.Add(part)
+                 
                  part.SourceType = PartitionSourceType.M
-                 # part.MExpression = source_expression
-                 # This part is complex due to TOM versions.
-                 pass
-             
-             # Adding empty table simpler for now or just Calc Table
-             if type == "Calculated":
-                 new_t.Partitions.Add(part) # Logic likely fails without proper Source object. 
-                 # For brevity, I'lll stub creation
-                 pass
-             
-             m.Tables.Add(new_t) 
+                 m_source = MPartitionSource()
+                 m_source.Expression = source_expression or (part.Source.Expression if part.Source else "let Source = \"\" in Source")
+                 part.Source = m_source
+                 
+             elif type == "Calculated":
+                 part = next((p for p in t.Partitions), None)
+                 if not part:
+                     part = Partition()
+                     part.Name = table_name
+                     t.Partitions.Add(part)
+
+                 part.SourceType = PartitionSourceType.Calculated
+                 calc_source = CalculatedPartitionSource()
+                 calc_source.Expression = source_expression
+                 part.Source = calc_source
+                 
              m.SaveChanges()
-             return f"Table '{table_name}' created (Stub)."
+             return f"Table '{table_name}' {operation}d successfully."
              
         elif operation == "delete":
             t = next((t for t in m.Tables if t.Name == table_name), None)
@@ -264,3 +297,40 @@ def get_vertipaq_stats() -> str:
     # Uses DMV
     query = "SELECT TOP 20 * FROM $SYSTEM.DISCOVER_STORAGE_TABLE_COLUMNS ORDER BY DICTIONARY_SIZE DESC"
     return run_dax(query)
+
+def export_model(connection_string: str, output_path: str) -> str:
+    """
+    Export the entire remote model (Dataset) to a local folder in TMDL format.
+    Useful for 'Recovering' lost PBIX files from the Service.
+    """
+    try:
+        # 1. Connect explicitly
+        msg = manage_model_connection(operation="connect", connection_string=connection_string)
+        if "Failed" in msg: return msg
+        
+        s = get_server()
+        if s.Databases.Count == 0: return "No database found in workspace/connection."
+        db = s.Databases[0]
+        
+        # 2. Prepare Output Directory
+        if not os.path.exists(output_path):
+            os.makedirs(output_path)
+            
+        # 3. Import Serializer
+        import clr
+        try:
+            # Try PowerBI named assembly first (standard for Store/local libs)
+            clr.AddReference("Microsoft.PowerBI.Tabular")
+            from Microsoft.AnalysisServices.Tabular import TmdlSerializer
+        except:
+            # Fallback
+            from Microsoft.AnalysisServices.Tabular import TmdlSerializer
+            
+        # 4. Serialize
+        # TmdlSerializer.SerializeDatabase(Database db, string path)
+        TmdlSerializer.SerializeDatabase(db, output_path)
+        
+        return f"Success! Model '{db.Name}' exported to: {output_path}"
+        
+    except Exception as e:
+        return f"Export Failed: {e}"
