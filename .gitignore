@@ -35,3 +35,10 @@ ENV/
 # Local Config
 mcp_config.json
 local_settings.py
+
+# SARA Build Artifacts
+*.spec
+*.zip
+SARA_Package_Zip/
+libs/
+Nova pasta/
